@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Alexandria Smart Port — Dark Ship Detection</title>
+    <meta name="description" content="Port authority dashboard for detecting dark ships using AIS data and SAR satellite imagery." />
+    <script>
+      (function () {
+        try {
+          var s = JSON.parse(localStorage.getItem("dark-ship-demo-store") || "{}");
+          if (s.theme === "dark") document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="./index--FJ6_5IA.js"></script>
+    <link rel="modulepreload" crossorigin href="./maplibre-f9tjYVu1.js">
+    <link rel="modulepreload" crossorigin href="./jspdf-bm1UrF3A.js">
+    <link rel="stylesheet" crossorigin href="./index-Bj6RElFC.css">
+  </head>
+  <body class="h-full bg-surface text-ink antialiased">
+    <div id="root" class="h-full"></div>
+  </body>
+</html>

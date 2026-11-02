@@ -1,0 +1,20 @@
+# Render Blueprint for مهامي (the to-do app in todo-app/).
+# Dashboard -> New -> Blueprint -> pick this repo + branch "todo-app".
+services:
+  - type: web
+    name: mahami
+    runtime: node
+    plan: free
+    rootDir: todo-app
+    buildCommand: npm ci --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: VAPID_SUBJECT
+        sync: false   # mailto:your-email@example.com
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false

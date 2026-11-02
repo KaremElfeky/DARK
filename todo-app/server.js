@@ -17,6 +17,7 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import webpush from 'web-push';
+import { createCore, httpError } from './lib/core.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8080;
@@ -27,18 +28,8 @@ const DB_FILE = path.join(DATA_DIR, 'db.json');
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 const TICK_MS = Number(process.env.TICK_MS) || 15_000;
-const RECOGNIZE_URL = process.env.RECOGNIZE_URL
-  || 'https://inputtools.google.com/request?ime=handwriting&app=mobilesearch&cs=1&oe=UTF-8';
-// Only ever send pushes to real push services (prevents using the server as an open proxy).
-const PUSH_HOSTS = (process.env.PUSH_HOSTS
-  || 'fcm.googleapis.com,android.googleapis.com,push.services.mozilla.com,push.apple.com,notify.windows.com')
-  .split(',').map((s) => s.trim()).filter(Boolean);
 
 const MIN = 60_000;
-const HOUR = 60 * MIN;
-const DAY = 24 * HOUR;
-// How late a reminder may still be delivered (e.g. after a server restart).
-const LATE = { day: 6 * HOUR, hour: 30 * MIN, due: 30 * MIN };
 
 /* ---------------- Storage ---------------- */
 
@@ -80,99 +71,6 @@ async function loadVapid() {
   console.warn(`[mahami] Generated new VAPID keys in ${VAPID_FILE}.`);
   console.warn('[mahami] In production set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY so subscriptions survive redeploys.');
   return keys;
-}
-
-/* ---------------- Validation ---------------- */
-
-const httpError = (status, message) => Object.assign(new Error(message), { status });
-
-function checkDeviceId(id) {
-  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(id)) throw httpError(400, 'bad deviceId');
-  return id;
-}
-
-function checkSubscription(sub) {
-  if (!sub || typeof sub !== 'object' || typeof sub.endpoint !== 'string' || sub.endpoint.length > 2048) {
-    throw httpError(400, 'bad subscription');
-  }
-  let url;
-  try { url = new URL(sub.endpoint); } catch { throw httpError(400, 'bad endpoint'); }
-  const okProto = url.protocol === 'https:';
-  const okHost = PUSH_HOSTS.some((h) => url.hostname === h || url.hostname.endsWith(`.${h}`));
-  if (!okProto || !okHost) throw httpError(400, 'unsupported push service');
-  const { p256dh, auth } = sub.keys || {};
-  if (typeof p256dh !== 'string' || typeof auth !== 'string' || p256dh.length > 200 || auth.length > 100) {
-    throw httpError(400, 'bad keys');
-  }
-  return { endpoint: sub.endpoint, keys: { p256dh, auth } };
-}
-
-const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
-
-function cleanReminders(list, now) {
-  if (!Array.isArray(list)) throw httpError(400, 'reminders must be an array');
-  return list.slice(0, 500).flatMap((r) => {
-    if (!r || typeof r !== 'object') return [];
-    const at = Number(r.at);
-    if (!Number.isFinite(at) || at < now - DAY || at > now + 400 * DAY) return [];
-    const kind = ['day', 'hour', 'due'].includes(r.kind) ? r.kind : 'hour';
-    const id = str(r.id, 160);
-    if (!id) return [];
-    return [{ id, taskId: str(r.taskId, 64), kind, at, title: str(r.title, 240) || 'مهامي', body: str(r.body, 300) }];
-  });
-}
-
-/* ---------------- Push ---------------- */
-
-async function sendPush(deviceId, payload, ttlMs = HOUR) {
-  const dev = db.devices[deviceId];
-  if (!dev?.subscription) return false;
-  try {
-    await webpush.sendNotification(dev.subscription, JSON.stringify(payload), {
-      TTL: Math.max(60, Math.round(ttlMs / 1000)),
-      urgency: 'high',
-    });
-    return true;
-  } catch (err) {
-    if (err.statusCode === 404 || err.statusCode === 410) {
-      // Subscription expired / user revoked permission.
-      delete db.devices[deviceId];
-      saveSoon();
-    } else {
-      console.warn(`[mahami] push failed (${err.statusCode || err.code || err.message})`);
-    }
-    return false;
-  }
-}
-
-let running = false;
-
-async function runScheduler(now = Date.now()) {
-  if (running) return 0;
-  running = true;
-  let sent = 0;
-  let changed = false;
-  try {
-    const jobs = [];
-    for (const [deviceId, dev] of Object.entries(db.devices)) {
-      for (const r of dev.reminders || []) {
-        if (r.sent || r.at > now) continue;
-        r.sent = now;
-        changed = true;
-        if (now - r.at > (LATE[r.kind] ?? LATE.hour)) continue; // too late to be useful
-        const payload = { title: r.title, body: r.body, tag: `${r.taskId}:${r.kind}`, taskId: r.taskId, kind: r.kind };
-        jobs.push(sendPush(deviceId, payload, LATE[r.kind]).then((ok) => { if (ok) sent++; }));
-      }
-      const before = dev.reminders?.length || 0;
-      dev.reminders = (dev.reminders || []).filter((r) => r.at > now - 2 * DAY);
-      if (dev.reminders.length !== before) changed = true;
-    }
-    await Promise.all(jobs);
-  } finally {
-    running = false;
-  }
-  if (changed) saveSoon();
-  return sent;
 }
 
 /* ---------------- HTTP helpers ---------------- */
@@ -226,72 +124,13 @@ setInterval(() => {
 
 /* ---------------- API ---------------- */
 
-let vapid;
-
-const routes = {
-  'GET /api/health': async () => ({ ok: true }),
-
-  'GET /api/config': async () => ({ publicKey: vapid.publicKey }),
-
-  'POST /api/subscribe': async (body) => {
-    const id = checkDeviceId(body.deviceId);
-    const subscription = checkSubscription(body.subscription);
-    const dev = db.devices[id] || { reminders: [] };
-    dev.subscription = subscription;
-    dev.updatedAt = Date.now();
-    db.devices[id] = dev;
-    saveSoon();
-    return { ok: true };
-  },
-
-  'POST /api/unsubscribe': async (body) => {
-    const id = checkDeviceId(body.deviceId);
-    delete db.devices[id];
-    saveSoon();
-    return { ok: true };
-  },
-
-  'PUT /api/reminders': async (body) => {
-    const id = checkDeviceId(body.deviceId);
-    const dev = db.devices[id];
-    if (!dev?.subscription) throw httpError(404, 'unknown device — subscribe first');
-    const now = Date.now();
-    const old = new Map((dev.reminders || []).map((r) => [r.id, r]));
-    dev.reminders = cleanReminders(body.reminders, now).map((r) => (old.get(r.id)?.sent ? { ...r, sent: old.get(r.id).sent } : r));
-    dev.updatedAt = now;
-    saveSoon();
-    return { ok: true, count: dev.reminders.length };
-  },
-
-  'POST /api/test': async (body) => {
-    const id = checkDeviceId(body.deviceId);
-    if (!db.devices[id]?.subscription) throw httpError(404, 'unknown device');
-    const ok = await sendPush(id, { title: 'ده إشعار تجربة', body: 'لو شايفه يبقى الإشعارات شغالة حتى والأبلكيشن مقفول', kind: 'test', tag: 'test' }, 10 * MIN);
-    if (!ok) throw httpError(502, 'push failed');
-    return { ok: true };
-  },
-
-  // Lets an external cron (e.g. cron-job.org) wake a sleeping free-tier host every minute.
-  'GET /api/tick': async () => ({ ok: true, sent: await runScheduler() }),
-
-  // Fallback handwriting proxy (used if the browser can't reach Google directly).
-  'POST /api/recognize': async (body) => {
-    const reqs = body?.requests;
-    if (!Array.isArray(reqs) || reqs.length < 1 || reqs.length > 4) throw httpError(400, 'bad request');
-    for (const r of reqs) {
-      if (!Array.isArray(r.ink) || r.ink.length > 600) throw httpError(400, 'bad ink');
-      if (typeof r.language !== 'string' || !/^[a-z]{2,3}(?:[_-][A-Za-z]{2,4})?$/.test(r.language)) throw httpError(400, 'bad language');
-    }
-    const upstream = await fetch(RECOGNIZE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    }).catch(() => null);
-    if (!upstream?.ok) throw httpError(502, 'recognizer unavailable');
-    return upstream.json();
-  },
+const store = {
+  async get(id) { return db.devices[id] || null; },
+  async put(id, dev) { db.devices[id] = dev; saveSoon(); },
+  async remove(id) { delete db.devices[id]; saveSoon(); },
+  async all() { return Object.entries(db.devices); },
 };
+let core;
 
 async function handleApi(req, res, url) {
   res.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN);
@@ -300,20 +139,18 @@ async function handleApi(req, res, url) {
   res.setHeader('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-  const route = routes[`${req.method} ${url.pathname}`];
-  if (!route) { sendJson(res, 404, { error: 'not found' }); return; }
-
   const bucket = url.pathname === '/api/recognize' ? 'rec' : 'api';
   if (rateLimited(req, bucket, bucket === 'rec' ? 60 : 240)) { sendJson(res, 429, { error: 'slow down' }); return; }
 
+  let body = {};
   try {
-    const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : {};
-    sendJson(res, 200, await route(body, req));
+    if (req.method === 'POST' || req.method === 'PUT') body = await readJson(req);
   } catch (err) {
-    const status = err.status || 500;
-    if (status === 500) console.error('[mahami]', err);
-    sendJson(res, status, { error: status === 500 ? 'server error' : err.message });
+    sendJson(res, err.status || 400, { error: err.message });
+    return;
   }
+  const { status, data } = await core.handle(req.method, url.pathname, body);
+  sendJson(res, status, data);
 }
 
 /* ---------------- Static files ---------------- */
@@ -388,8 +225,14 @@ async function serveStatic(req, res, url) {
 /* ---------------- Boot ---------------- */
 
 await loadDb();
-vapid = await loadVapid();
-webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:admin@example.com', vapid.publicKey, vapid.privateKey);
+const vapid = await loadVapid();
+core = createCore({
+  store,
+  vapid,
+  subject: process.env.VAPID_SUBJECT,
+  recognizeUrl: process.env.RECOGNIZE_URL,
+  pushHosts: process.env.PUSH_HOSTS,
+});
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -397,7 +240,7 @@ const server = http.createServer((req, res) => {
   else serveStatic(req, res, url).catch((e) => { console.error(e); res.writeHead(500); res.end(); });
 });
 
-setInterval(() => runScheduler().catch((e) => console.error('[mahami] scheduler', e)), TICK_MS);
+setInterval(() => core.runScheduler().catch((e) => console.error('[mahami] scheduler', e)), TICK_MS);
 
 server.listen(PORT, HOST, () => {
   console.log(`[mahami] running on http://localhost:${PORT}`);

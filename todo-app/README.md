@@ -17,7 +17,17 @@ npm start          # http://localhost:8080
 npm test           # parser tests + full push server test
 ```
 
-## Deploying (so notifications arrive while the app is closed)
+## Deploying for free on Vercel
+
+1. On [vercel.com](https://vercel.com): **Add New → Project** → choose the `DARK` repository.
+   - Set **Root Directory** = `todo-app`, choose the `todo-app` branch, and leave Framework set to `Other`.
+2. Under **Environment Variables**, add `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT`.
+3. After the deploy: **Storage → Marketplace → Upstash (Redis)** → Create → Connect to the project.
+   - This adds `KV_REST_API_URL` / `KV_REST_API_TOKEN` automatically. Then run **Redeploy**.
+4. On [cron-job.org](https://cron-job.org), create a job that calls `https://your-site.vercel.app/api/tick` **every minute**.
+   - This is what sends notifications on time.
+
+## Deploying on a regular server (Render / Docker / VPS)
 
 The app has to be deployed **over HTTPS** with `server.js` running all the time:
 

@@ -1,3 +1,7 @@
 node_modules
 data
 tests
+api
+lib/vercel.js
+lib/redis-store.js
+vercel.json

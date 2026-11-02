@@ -1,6 +1,7 @@
 // Glue between Vercel Serverless Functions (api/*.js) and the shared core.
 import { createCore } from './core.js';
 import { redisStore } from './redis-store.js';
+import { createMailer } from './mailer.js';
 
 let core = null;
 
@@ -16,6 +17,9 @@ function getCore() {
     subject: process.env.VAPID_SUBJECT,
     recognizeUrl: process.env.RECOGNIZE_URL,
     pushHosts: process.env.PUSH_HOSTS,
+    mailer: createMailer(process.env),
+    allowedEmails: process.env.ALERT_EMAILS || process.env.SMTP_USER,
+    appUrl: process.env.APP_URL,
   });
   return core;
 }

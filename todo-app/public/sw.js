@@ -1,5 +1,5 @@
 // Service worker: offline support + push notifications.
-const VERSION = 'mahami-v1';
+const VERSION = 'mahami-v2';
 const SHELL = [
   './',
   './index.html',
@@ -10,6 +10,7 @@ const SHELL = [
   './js/icons.js',
   './js/ui.js',
   './js/notify.js',
+  './js/sync.js',
   './js/ink.js',
   './js/calendar.js',
   './js/config.js',
@@ -81,17 +82,25 @@ self.addEventListener('push', (event) => {
   const actions = d.kind === 'test' || !d.taskId ? []
     : d.kind === 'day' ? [{ action: 'done', title: 'خلصتها ✓' }]
       : [{ action: 'done', title: 'خلصتها ✓' }, { action: 'snooze', title: 'أجّل ساعة' }];
-  event.waitUntil(self.registration.showNotification(title, {
-    body: d.body || '',
-    tag: d.tag || undefined,
-    renotify: !!d.tag,
-    icon: 'icons/icon-192.png',
-    badge: 'icons/badge-96.png',
-    lang: 'ar',
-    dir: 'rtl',
-    data: { taskId: d.taskId, kind: d.kind },
-    actions,
-  }));
+  event.waitUntil((async () => {
+    await self.registration.showNotification(title, {
+      body: d.body || '',
+      tag: d.tag || undefined,
+      renotify: !!d.tag,
+      icon: 'icons/icon-192.png',
+      badge: 'icons/badge-96.png',
+      lang: 'ar',
+      dir: 'rtl',
+      data: { taskId: d.taskId, kind: d.kind },
+      actions,
+      silent: false, // use the device's notification sound
+      requireInteraction: d.kind === 'hour' || d.kind === 'due', // stay on screen until you react
+      vibrate: [300, 120, 300, 120, 600],
+    });
+    // If the app is open, ring there too.
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of clients) c.postMessage({ type: 'reminder', title, taskId: d.taskId, kind: d.kind });
+  })());
 });
 
 self.addEventListener('notificationclick', (event) => {

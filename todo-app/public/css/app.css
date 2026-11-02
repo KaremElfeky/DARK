@@ -522,6 +522,14 @@ textarea.input { resize: vertical; line-height: 1.5; }
 .status.ok { background: var(--ok-soft); } .status.ok > .i { color: var(--ok); }
 .status.warn { background: var(--warn-soft); } .status.warn > .i { color: var(--warn); }
 .status.bad { background: var(--danger-soft); } .status.bad > .i { color: var(--danger); }
+.hint.warn { color: var(--warn); }
+.link-row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+.link-row[hidden] { display: none; }
+.link-row input {
+  flex: 1; min-width: 0; height: 42px; padding: 0 12px; font-size: 16px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2);
+}
+.sync-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; letter-spacing: .5px; user-select: all; }
 
 .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; cursor: pointer; }
 .switch + .switch { border-top: 1px solid var(--line); }

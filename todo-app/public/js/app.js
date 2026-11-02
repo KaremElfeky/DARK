@@ -7,6 +7,7 @@ import {
 import { icon } from './icons.js';
 import { $, $$, esc, openSheet, sheetOpen, toast, vibrate, autoDir } from './ui.js';
 import * as notify from './notify.js';
+import * as sync from './sync.js';
 import { openInk, isOpen as inkIsOpen } from './ink.js';
 import { downloadICS, downloadBlob } from './calendar.js';
 
@@ -570,6 +571,11 @@ function openSettings() {
       </section>
 
       <section class="set-group">
+        <h3>تنبيه على الإيميل</h3>
+        ${emailHTML()}
+      </section>
+
+      <section class="set-group">
         <h3>الكتابة بالقلم</h3>
         <div class="set-row"><span>لغة الخط</span>
           <div class="seg" role="group">
@@ -595,7 +601,18 @@ function openSettings() {
 
       <section class="set-group">
         <h3>بياناتك</h3>
-        <p class="hint">المهام محفوظة على الجهاز ده. خد نسخة احتياطية من وقت للتاني.</p>
+        <div data-sync-status>${syncHTML()}</div>
+        <p class="hint">كود المزامنة: اكتبه على أي جهاز تاني (الآيباد، الموبايل، الكمبيوتر) عشان تلاقي نفس المهام هناك.</p>
+        <div class="set-row"><span>الكود بتاعك</span><b class="sync-code" dir="ltr">${esc(sync.prettyCode(store.account))}</b></div>
+        <div class="row-actions">
+          <button type="button" class="btn small" data-s="copy-code">${icon('download')}انسخ الكود</button>
+          <button type="button" class="btn small" data-s="link">استخدم كود جهاز تاني</button>
+        </div>
+        <div class="link-row" hidden data-link-row>
+          <input type="text" dir="ltr" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="xxxx xxxx xxxx xxxx xxxx xxxx" data-link-input>
+          <button type="button" class="btn small primary" data-s="link-save">اربط</button>
+        </div>
+        <p class="hint">ونسخة احتياطية على ملف لو حبيت:</p>
         <div class="row-actions">
           <button type="button" class="btn" data-s="export">${icon('download')}نسخة احتياطية</button>
           <button type="button" class="btn" data-s="import">${icon('upload')}رجّع نسخة</button>
@@ -603,6 +620,38 @@ function openSettings() {
         <input type="file" accept="application/json,.json" hidden data-s-file>
       </section>`);
   }
+
+  function emailHTML() {
+    const ss = sync.status();
+    const saved = store.settings.email || '';
+    let note = '';
+    if (ss.ok && !ss.email.configured) note = '<p class="hint warn">الإيميل لسه مش متفعّل على السيرفر (محتاج SMTP_USER و SMTP_PASS — شوف README).</p>';
+    else if (saved && ss.ok && !ss.email.allowed) note = '<p class="hint warn">الإيميل ده مش مسموح على السيرفر (ضيفه في ALERT_EMAILS).</p>';
+    else if (saved) note = '<p class="hint">هيوصلك إيميل مع كل تنبيه (قبلها بيوم/بساعة/في الميعاد حسب اختيارك فوق).</p>';
+    else note = '<p class="hint">اكتب إيميلك ويوصلك إيميل مع كل تنبيه — حتى لو الإشعارات مش شغالة.</p>';
+    return `
+      <div class="link-row">
+        <input type="email" dir="ltr" autocomplete="email" placeholder="you@gmail.com" value="${esc(saved)}" data-email>
+        <button type="button" class="btn small primary" data-s="email-save">احفظ</button>
+      </div>
+      ${note}
+      ${saved ? `<button type="button" class="btn small" data-s="email-test">${icon('bell')}ابعت إيميل تجربة</button>` : ''}`;
+  }
+
+  function syncHTML() {
+    const ss = sync.status();
+    if (ss.ok) return `<div class="status ok">${icon('check')}<div><b>المهام محفوظة على السيرفر</b><span>آخر مزامنة ${esc(relative(ss.at))}. لو مسحت المتصفح أو غيرت الجهاز، اكتب الكود ده وهترجع.</span></div></div>`;
+    if (ss.ok === false) return `<div class="status warn">${icon('alert')}<div><b>مش قادر أوصل للسيرفر دلوقتي</b><span>المهام محفوظة على الجهاز وهتترفع أول ما النت يرجع.</span></div></div>`;
+    return `<div class="status">${icon('clock')}<div><b>بيزامن…</b><span></span></div></div>`;
+  }
+
+  // Refresh only the sync status box (redrawing everything would wipe what you're typing).
+  const onSync = () => {
+    if (ctl.closed) { syncListeners.delete(onSync); return; }
+    const box = $('[data-sync-status]', ctl.el);
+    if (box) box.innerHTML = syncHTML();
+  };
+  syncListeners.add(onSync);
 
   ctl.el.addEventListener('change', (e) => {
     const t = e.target;
@@ -615,6 +664,30 @@ function openSettings() {
     if (b.dataset.inkLang) { store.setSettings({ inkLang: b.dataset.inkLang }); draw(); }
     else if (b.dataset.pen) { store.setSettings({ penOnly: b.dataset.pen }); draw(); }
     else if (b.dataset.s === 'enable') { await enableNotifications(); draw(); }
+    else if (b.dataset.s === 'email-save') {
+      const v = $('[data-email]', ctl.el).value.trim();
+      if (v && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) { toast('الإيميل ده مش مظبوط'); return; }
+      store.setSettings({ email: v });
+      await sync.syncNow();
+      toast(v ? 'اتحفظ ✓' : 'اتشال الإيميل');
+      draw();
+    } else if (b.dataset.s === 'email-test') {
+      try { await sync.testEmail(); toast('اتبعت — بص على الإيميل (وكمان الـ Spam)'); }
+      catch (err) { toast(err.status === 503 ? 'الإيميل مش متفعّل على السيرفر' : err.status === 403 ? 'الإيميل ده مش مسموح على السيرفر' : 'معرفتش أبعت الإيميل'); }
+    } else if (b.dataset.s === 'copy-code') {
+      try { await navigator.clipboard.writeText(store.account); toast('اتنسخ الكود'); }
+      catch { toast(sync.prettyCode(store.account), { duration: 10000 }); }
+    } else if (b.dataset.s === 'link') {
+      const row = $('[data-link-row]', ctl.el);
+      row.hidden = !row.hidden;
+      if (!row.hidden) $('[data-link-input]', row).focus();
+    } else if (b.dataset.s === 'link-save') {
+      const v = $('[data-link-input]', ctl.el).value;
+      if (!store.setAccount(v)) { toast('الكود ده مش مظبوط'); return; }
+      const ok = await sync.syncNow();
+      toast(ok ? 'اتربط ✓ — المهام من الجهازين بقت مع بعض' : 'اتحفظ الكود، وهيزامن أول ما النت يرجع');
+      draw();
+    }
     else if (b.dataset.s === 'test') {
       try {
         const via = await notify.sendTest();
@@ -900,10 +973,18 @@ store.subscribe(() => {
 render();
 updatePreview();
 
+const syncListeners = new Set();
+sync.init({
+  onChange: () => { for (const fn of syncListeners) fn(); },
+  onDeviceMissing: () => notify.resubscribe(),
+});
+
 notify.init({
   getTasks: tasks,
   getSettings: () => store.settings,
   deviceId: () => store.deviceId,
+  account: () => store.account,
+  syncTasks: () => sync.syncNow(),
   onAction: handleAction,
   onChange: render,
   onTick: render,

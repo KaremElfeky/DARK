@@ -18,7 +18,7 @@ export const isStandalone = () => matchMedia('(display-mode: standalone)').match
 
 let ctx = null;
 let swReg = null;
-let server = { ok: false, publicKey: null };
+let server = { ok: false, publicKey: null, sync: false };
 let pushActive = false;
 let syncTimer = null;
 
@@ -82,6 +82,7 @@ export async function init(options) {
     }
     navigator.serviceWorker.addEventListener('message', (e) => {
       if (e.data?.type === 'notification-action') ctx.onAction?.(e.data);
+      if (e.data?.type === 'reminder') { chime(); ctx.onInApp?.(e.data.title, e.data); }
     });
   }
 
@@ -119,9 +120,9 @@ async function checkServer() {
     const res = await fetch(apiUrl('api/config'), { signal: ctrl.signal, cache: 'no-store' });
     clearTimeout(t);
     const json = res.ok ? await res.json() : null;
-    server = { ok: !!json?.publicKey, publicKey: json?.publicKey || null };
+    server = { ok: !!json?.publicKey, publicKey: json?.publicKey || null, sync: !!json?.sync };
   } catch {
-    server = { ok: false, publicKey: null };
+    server = { ok: false, publicKey: null, sync: false };
   }
 }
 
@@ -170,9 +171,17 @@ async function ensurePush() {
     sub = null;
   }
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-  await api('api/subscribe', { deviceId: ctx.deviceId(), subscription: sub.toJSON() });
+  await api('api/subscribe', { deviceId: ctx.deviceId(), account: ctx.account?.(), subscription: sub.toJSON() });
   pushActive = true;
   await syncNow();
+}
+
+/** The server lost this device (e.g. its database was reset) -> subscribe again. */
+export async function resubscribe() {
+  if (!pushActive || permission() !== 'granted') return;
+  pushActive = false;
+  try { await ensurePush(); } catch (e) { console.warn('Push setup failed', e); }
+  ctx?.onChange?.();
 }
 
 export function scheduleSync(delay = 800) {
@@ -183,6 +192,7 @@ export function scheduleSync(delay = 800) {
 
 async function syncNow() {
   if (!pushActive || !ctx) return;
+  if (server.sync) { await ctx.syncTasks?.(); return; } // the server builds reminders from the synced tasks
   const now = Date.now();
   const reminders = ctx.getTasks()
     .flatMap((t) => remindersFor(t, ctx.getSettings()))
@@ -247,7 +257,37 @@ function tick() {
   if (changed) saveSent(sent, now);
 }
 
+/* ---------------- Alarm sound (while the app is open) ---------------- */
+
+let audio = null;
+// Browsers only allow sound after the user touched the page once.
+['pointerdown', 'keydown'].forEach((ev) => addEventListener(ev, () => {
+  try {
+    audio ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === 'suspended') audio.resume();
+  } catch { /* no audio */ }
+}, { passive: true }));
+
+export function chime() {
+  try { navigator.vibrate?.([300, 120, 300, 120, 600]); } catch { /* ignore */ }
+  if (!audio || audio.state !== 'running') return;
+  const t0 = audio.currentTime;
+  [[880, 0], [660, 0.25], [880, 0.5], [660, 0.75], [988, 1.0]].forEach(([f, dt]) => {
+    const o = audio.createOscillator();
+    const g = audio.createGain();
+    o.type = 'sine';
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t0 + dt);
+    g.gain.exponentialRampToValueAtTime(0.35, t0 + dt + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.22);
+    o.connect(g).connect(audio.destination);
+    o.start(t0 + dt);
+    o.stop(t0 + dt + 0.25);
+  });
+}
+
 function fire(title, r) {
+  if (!document.hidden) chime();
   if (permission() === 'granted') {
     show(title, { body: r.body, tag: `${r.taskId}:${r.kind}`, data: { taskId: r.taskId, kind: r.kind }, kind: r.kind });
   }
@@ -264,6 +304,9 @@ async function show(title, { body, tag, data = {}, kind } = {}) {
     lang: 'ar',
     dir: 'rtl',
     data,
+    silent: false,
+    requireInteraction: !!kind && kind !== 'day',
+    vibrate: [300, 120, 300, 120, 600],
   };
   try {
     const reg = 'serviceWorker' in navigator && swReg ? await activeRegistration(3000).catch(() => null) : null;

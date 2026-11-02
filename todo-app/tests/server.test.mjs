@@ -147,3 +147,22 @@ test('CORS preflight works for a separately hosted frontend', async () => {
   assert.equal(res.status, 204);
   assert.equal(res.headers.get('access-control-allow-origin'), '*');
 });
+
+test('sends a push from tasks saved with /api/sync (no reminder list needed)', async () => {
+  const account = 'acct-e2e-000000001';
+  const deviceId = 'device-sync-0001';
+  assert.equal((await api('POST', '/api/subscribe', { deviceId, account, subscription })).status, 200);
+  const before = received.length;
+  const now = Date.now();
+  const res = await api('POST', '/api/sync', { account, deviceId, deleted: {}, tasks: [
+    { id: 'meet', title: 'اجتماع', due: now + 300, createdAt: now - 3_600_000, updatedAt: now },
+  ], settings: { remind: { day: true, hour: true, due: true }, email: '', at: now } });
+  assert.equal(res.status, 200);
+  assert.equal(res.json.device, true);
+  for (let i = 0; i < 40 && received.length === before; i++) await wait(100);
+  // The first subscription test registered the same endpoint for another device, so only count ours.
+  const mine = received.slice(before).map((m) => JSON.parse(ece.decrypt(m.body, { version: 'aes128gcm', privateKey: ecdh, authSecret: authSecret.toString('base64url') }).toString('utf8')));
+  assert.ok(mine.some((p) => p.title === 'دلوقتي: اجتماع' && p.kind === 'due'));
+  await wait(800);
+  assert.equal(received.slice(before).length, mine.length, 'not sent again');
+});

@@ -10,6 +10,8 @@
 //   VAPID_SUBJECT        mailto:you@yourdomain.com  (Apple requires a real contact)
 //   CORS_ORIGIN          allowed origin when the website is hosted elsewhere (default *)
 //   TICK_MS              scheduler interval (default 15000)
+//   SMTP_USER/SMTP_PASS  email reminders (see lib/mailer.js); ALERT_EMAILS = who may receive them
+//   APP_URL              link put in reminder emails
 
 import http from 'node:http';
 import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
@@ -18,6 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import webpush from 'web-push';
 import { createCore, httpError } from './lib/core.js';
+import { createMailer } from './lib/mailer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8080;
@@ -33,16 +36,16 @@ const MIN = 60_000;
 
 /* ---------------- Storage ---------------- */
 
-let db = { devices: {} };
+let db = { devices: {}, accounts: {}, claims: {} };
 let saving = Promise.resolve();
 let saveTimer = null;
 
 async function loadDb() {
   try {
     const parsed = JSON.parse(await readFile(DB_FILE, 'utf8'));
-    db = { devices: parsed.devices || {} };
+    db = { devices: parsed.devices || {}, accounts: parsed.accounts || {}, claims: parsed.claims || {} };
   } catch {
-    db = { devices: {} };
+    db = { devices: {}, accounts: {}, claims: {} };
   }
 }
 
@@ -129,6 +132,17 @@ const store = {
   async put(id, dev) { db.devices[id] = dev; saveSoon(); },
   async remove(id) { delete db.devices[id]; saveSoon(); },
   async all() { return Object.entries(db.devices); },
+  async getAccount(id) { return db.accounts[id] || null; },
+  async putAccount(id, acct) { db.accounts[id] = acct; saveSoon(); },
+  async allAccounts() { return Object.entries(db.accounts); },
+  async claim(name, ttlMs) {
+    const now = Date.now();
+    for (const [k, exp] of Object.entries(db.claims)) if (exp < now) delete db.claims[k];
+    if (db.claims[name]) return false;
+    db.claims[name] = now + ttlMs;
+    saveSoon();
+    return true;
+  },
 };
 let core;
 
@@ -232,6 +246,9 @@ core = createCore({
   subject: process.env.VAPID_SUBJECT,
   recognizeUrl: process.env.RECOGNIZE_URL,
   pushHosts: process.env.PUSH_HOSTS,
+  mailer: createMailer(process.env),
+  allowedEmails: process.env.ALERT_EMAILS || process.env.SMTP_USER,
+  appUrl: process.env.APP_URL,
 });
 
 const server = http.createServer((req, res) => {

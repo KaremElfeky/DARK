@@ -9,7 +9,10 @@ const sets = new Map();
 function run([c, ...a]) {
   switch (c.toUpperCase()) {
     case 'GET': return kv.get(a[0]) ?? null;
-    case 'SET': kv.set(a[0], a[1]); return 'OK';
+    case 'SET': {
+      if (a.map((x) => String(x).toUpperCase()).includes('NX') && kv.has(a[0])) return null;
+      kv.set(a[0], a[1]); return 'OK';
+    }
     case 'DEL': return kv.delete(a[0]) ? 1 : 0;
     case 'MGET': return a.map((k) => kv.get(k) ?? null);
     case 'SADD': { const s = sets.get(a[0]) || new Set(); s.add(a[1]); sets.set(a[0], s); return 1; }
@@ -83,4 +86,33 @@ test('config, subscribe, sync and tick through Redis', async () => {
 
   assert.equal((await call('OPTIONS', '/api/reminders')).status, 204);
   assert.equal((await call('PUT', '/api/reminders', { deviceId: 'nobody-here', reminders: [] })).status, 404);
+});
+
+test('sync saves tasks in Redis and merges devices', async () => {
+  const account = 'acct-0123456789abcdef';
+  const t0 = Date.now();
+  const a = await call('POST', '/api/sync', { account, tasks: [
+    { id: 'x1', title: 'من الآيباد', due: t0 + 3_600_000, createdAt: t0, updatedAt: t0 },
+    { id: 'x2', title: 'هتتمسح', createdAt: t0, updatedAt: t0 },
+  ], deleted: {}, settings: { remind: { day: true, hour: true, due: true }, email: 'Me@Example.com', at: t0 } });
+  assert.equal(a.status, 200);
+  assert.equal(a.data.tasks.length, 2);
+  assert.ok(JSON.parse(kv.get(`mahami:acct:${account}`)).tasks.length === 2, 'stored in Redis');
+
+  // Second device: edits x1 (newer), deletes x2, adds x3, has an older copy of nothing else.
+  const b = await call('POST', '/api/sync', { account, tasks: [
+    { id: 'x1', title: 'اتعدلت', due: t0 + 3_600_000, createdAt: t0, updatedAt: t0 + 10 },
+    { id: 'x3', title: 'من الموبايل', createdAt: t0 + 5, updatedAt: t0 + 5 },
+  ], deleted: { x2: t0 + 20 } });
+  assert.deepEqual(b.data.tasks.map((t) => [t.id, t.title]), [['x1', 'اتعدلت'], ['x3', 'من الموبايل']]);
+  assert.equal(b.data.settings.email, 'me@example.com', 'settings kept when the other device sends none');
+
+  // First device comes back with its stale copy: the deleted task must not return, the edit must win.
+  const c = await call('POST', '/api/sync', { account, tasks: [
+    { id: 'x1', title: 'من الآيباد', due: t0 + 3_600_000, createdAt: t0, updatedAt: t0 },
+    { id: 'x2', title: 'هتتمسح', createdAt: t0, updatedAt: t0 },
+  ], deleted: {} });
+  assert.deepEqual(c.data.tasks.map((t) => t.title), ['اتعدلت', 'من الموبايل']);
+
+  assert.equal((await call('POST', '/api/sync', { account: 'short', tasks: [] })).status, 400);
 });

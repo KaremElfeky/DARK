@@ -25,7 +25,13 @@ npm test           # parser tests + full push server test
 3. After the deploy: **Storage → Marketplace → Upstash (Redis)** → Create → Connect to the project.
    - This adds `KV_REST_API_URL` / `KV_REST_API_TOKEN` automatically. Then run **Redeploy**.
 4. On [cron-job.org](https://cron-job.org), create a job that calls `https://your-site.vercel.app/api/tick` **every minute**.
-   - This is what sends notifications on time.
+   - This is what sends notifications (and emails) on time.
+5. **Email reminders (optional):** add these env vars, then Redeploy:
+   - `SMTP_USER` = the Gmail address that sends the mail, `SMTP_PASS` = a Gmail **App password**
+     (Google Account → Security → 2-Step Verification → App passwords).
+   - `ALERT_EMAILS` = the addresses allowed to receive reminders (comma-separated; defaults to `SMTP_USER`).
+   - `APP_URL` = your site's URL (used for the button in the email).
+   - Then in the app: Settings → «تنبيه على الإيميل» → type your email → «ابعت إيميل تجربة».
 
 ## Deploying on a regular server (Render / Docker / VPS)
 
@@ -54,5 +60,9 @@ Notifications on iOS only work after the app is installed: open the site in Safa
 | Server: hosting + push sending + scheduling | `server.js` |
 
 - **Handwriting recognition** uses Google's handwriting engine (the one behind Google Input Tools), which supports Arabic and English. It needs an internet connection, and your writing stays saved if the connection drops. The server also acts as a backup proxy for it.
-- **Tasks are stored on the device** (localStorage). Back them up from Settings.
+- **Tasks are saved on the device and on the server** (Upstash Redis on Vercel, `DATA_DIR/db.json` with `server.js`).
+  Every device has a **sync code** in Settings → «بياناتك». Type the same code on another device to get the same tasks there.
+  The server sends the reminders (push + email) from these saved tasks, so they arrive even when the app is closed.
+- Reminders: a day before, an hour before, and **at the task time** (all on by default; change them in Settings).
+  A reminder isn't sent if the task was added after that reminder's time (e.g. a task due in 20 minutes only gets the "at the time" one).
 - If the server isn't available, notifications only work while the app is open. Calendar export (`.ics` with both reminders) is a backup that always works.

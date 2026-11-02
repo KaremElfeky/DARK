@@ -3,7 +3,13 @@
 //
 // A store implements:
 //   get(id) -> device | null      put(id, device)      remove(id)      all() -> [[id, device], ...]
-// where device = { subscription, reminders: [...], updatedAt }
+//   getAccount(id) -> account | null   putAccount(id, account)   allAccounts() -> [[id, account], ...]
+//   claim(key, ttlMs) -> true the first time a key is claimed (until it expires), false after that
+// where device  = { subscription, account?, reminders: [...] (legacy clients), updatedAt }
+//       account = { tasks: [...], deleted: { taskId: deletedAt }, settings: { remind, email, at }, updatedAt }
+//
+// An "account" is the sync code shown in Settings: every device that uses the same code shares the
+// same tasks, and the server sends reminders (push + email) from those tasks.
 
 import webpush from 'web-push';
 
@@ -19,7 +25,15 @@ const DEFAULT_PUSH_HOSTS = 'fcm.googleapis.com,android.googleapis.com,push.servi
 
 export const httpError = (status, message) => Object.assign(new Error(message), { status });
 
-export function createCore({ store, vapid, subject, recognizeUrl, pushHosts }) {
+const TOMBSTONE_TTL = 60 * DAY;
+const MAX_TASKS = 2000;
+export const DEFAULT_REMIND = { day: true, hour: true, due: true };
+
+/** Turn a comma-separated list of emails into a lowercase Set. */
+export const emailSet = (list) => new Set(String(list || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean));
+
+export function createCore({ store, vapid, subject, recognizeUrl, pushHosts, mailer = null, allowedEmails = '', appUrl = '' }) {
+  const ALLOWED_EMAILS = emailSet(allowedEmails);
   const RECOGNIZE_URL = recognizeUrl || DEFAULT_RECOGNIZE_URL;
   const PUSH_HOSTS = (pushHosts || DEFAULT_PUSH_HOSTS).split(',').map((s) => s.trim()).filter(Boolean);
   webpush.setVapidDetails(subject || 'mailto:admin@example.com', vapid.publicKey, vapid.privateKey);
@@ -47,6 +61,85 @@ export function createCore({ store, vapid, subject, recognizeUrl, pushHosts }) {
   }
 
   const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const num = (v) => (Number.isFinite(Number(v)) && v !== null && v !== '' ? Number(v) : null);
+
+  const checkAccount = (id) => {
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{16,64}$/.test(id)) throw httpError(400, 'bad account');
+    return id;
+  };
+
+  function cleanEmail(v) {
+    const e = str(v, 254).trim().toLowerCase();
+    if (!e) return '';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) throw httpError(400, 'bad email');
+    return e;
+  }
+
+  const emailAllowed = (e) => !!e && (ALLOWED_EMAILS.size === 0 || ALLOWED_EMAILS.has(e));
+
+  function cleanTask(t) {
+    if (!t || typeof t !== 'object') return null;
+    const id = str(t.id, 64);
+    const title = str(t.title, 500);
+    if (!id || typeof t.title !== 'string') return null;
+    return {
+      id,
+      title,
+      due: num(t.due),
+      done: !!t.done,
+      doneAt: num(t.doneAt),
+      postponed: Math.max(0, Math.min(999, num(t.postponed) || 0)),
+      source: str(t.source, 16) || 'text',
+      createdAt: num(t.createdAt) || Date.now(),
+      updatedAt: num(t.updatedAt) || 0,
+    };
+  }
+
+  function cleanSettings(s) {
+    if (!s || typeof s !== 'object') return null;
+    const r = s.remind || {};
+    return {
+      remind: { day: r.day !== false, hour: r.hour !== false, due: r.due !== false },
+      email: cleanEmail(s.email),
+      at: num(s.at) || 0,
+    };
+  }
+
+  /**
+   * Last-write-wins merge, per task (by updatedAt). A deleted task leaves a tombstone so a device that
+   * still has the old copy doesn't bring it back.
+   */
+  function mergeAccount(acct, incoming, now) {
+    const tasks = new Map((acct.tasks || []).map((t) => [t.id, t]));
+    const deleted = { ...(acct.deleted || {}) };
+
+    for (const [id, at] of Object.entries(incoming.deleted || {})) {
+      const ts = num(at);
+      if (typeof id === 'string' && id.length <= 64 && ts) deleted[id] = Math.max(deleted[id] || 0, ts);
+    }
+    for (const raw of Array.isArray(incoming.tasks) ? incoming.tasks.slice(0, MAX_TASKS) : []) {
+      const t = cleanTask(raw);
+      if (!t) continue;
+      const cur = tasks.get(t.id);
+      if (!cur || t.updatedAt > cur.updatedAt) tasks.set(t.id, t);
+    }
+    for (const [id, at] of Object.entries(deleted)) {
+      const t = tasks.get(id);
+      if (t && t.updatedAt <= at) tasks.delete(id);
+      if (at < now - TOMBSTONE_TTL) delete deleted[id];
+    }
+
+    let settings = acct.settings || null;
+    const s = cleanSettings(incoming.settings);
+    if (s && (!settings || s.at >= (settings.at || 0))) settings = s;
+
+    return {
+      tasks: [...tasks.values()].sort((a, b) => a.createdAt - b.createdAt).slice(-MAX_TASKS),
+      deleted,
+      settings: settings || { remind: { ...DEFAULT_REMIND }, email: '', at: 0 },
+      updatedAt: now,
+    };
+  }
 
   function cleanReminders(list, now) {
     if (!Array.isArray(list)) throw httpError(400, 'reminders must be an array');
@@ -78,6 +171,64 @@ export function createCore({ store, vapid, subject, recognizeUrl, pushHosts }) {
     }
   }
 
+  /* ---------------- Email ---------------- */
+
+  const fmtWhen = (ts) => new Intl.DateTimeFormat('ar-EG', {
+    timeZone: process.env.TZ_DISPLAY || 'Africa/Cairo', weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit',
+  }).format(ts);
+
+  const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+  async function sendEmail(to, { title, body, due }) {
+    if (!mailer || !emailAllowed(to)) return false;
+    const when = due ? fmtWhen(due) : '';
+    const link = appUrl ? `<p style="margin:24px 0 0"><a href="${escHtml(appUrl)}" style="background:#4f46e5;color:#fff;padding:10px 18px;border-radius:10px;text-decoration:none">افتح مهامي</a></p>` : '';
+    try {
+      await mailer.send({
+        to,
+        subject: `🔔 ${title}`,
+        text: [title, body, when, appUrl].filter(Boolean).join('\n'),
+        html: `<div dir="rtl" style="font-family:Tahoma,Arial,sans-serif;font-size:16px;line-height:1.7;color:#111">
+          <h2 style="margin:0 0 8px">${escHtml(title)}</h2>
+          ${body ? `<p style="margin:0">${escHtml(body)}</p>` : ''}
+          ${when ? `<p style="margin:8px 0 0;color:#555">${escHtml(when)}</p>` : ''}${link}</div>`,
+      });
+      return true;
+    } catch (err) {
+      console.warn(`[mahami] email failed (${err.code || err.message})`);
+      return false;
+    }
+  }
+
+  /* ---------------- Reminders from stored tasks ---------------- */
+
+  const OFFSETS = { day: DAY, hour: HOUR, due: 0 };
+  const fmtTime = (ts) => new Intl.DateTimeFormat('ar-EG', { timeZone: process.env.TZ_DISPLAY || 'Africa/Cairo', hour: 'numeric', minute: '2-digit' }).format(ts);
+
+  function reminderText(task, kind) {
+    const time = fmtTime(task.due);
+    if (kind === 'day') return { title: `بكرة: ${task.title}`, body: `الساعة ${time} — متنساش` };
+    if (kind === 'hour') return { title: `كمان ساعة: ${task.title}`, body: `الساعة ${time}` };
+    return { title: `دلوقتي: ${task.title}`, body: 'جه الميعاد — خلصتها؟' };
+  }
+
+  /** Reminders of this account that are due now (not yet claimed). */
+  function dueReminders(acct, now) {
+    const remind = acct.settings?.remind || DEFAULT_REMIND;
+    const out = [];
+    for (const t of acct.tasks || []) {
+      if (t.done || !t.due) continue;
+      for (const kind of ['day', 'hour', 'due']) {
+        if (!remind[kind]) continue;
+        const at = t.due - OFFSETS[kind];
+        if (at > now || now - at > LATE[kind]) continue;
+        if (t.createdAt > at) continue; // task was added after this reminder's time — don't nag right away
+        out.push({ task: t, kind, at, key: `${t.id}:${kind}:${t.due}`, ...reminderText(t, kind) });
+      }
+    }
+    return out;
+  }
+
   let running = false;
 
   async function runScheduler(now = Date.now()) {
@@ -85,8 +236,29 @@ export function createCore({ store, vapid, subject, recognizeUrl, pushHosts }) {
     running = true;
     let sent = 0;
     try {
-      const devices = await store.all();
-      await Promise.all(devices.map(async ([id, dev]) => {
+      const [devices, accounts] = await Promise.all([store.all(), store.allAccounts ? store.allAccounts() : []]);
+      const gone = new Set();
+
+      // 1) Reminders computed from each account's stored tasks -> push to its devices + email.
+      await Promise.all(accounts.map(async ([acctId, acct]) => {
+        const targets = devices.filter(([, d]) => d.account === acctId && d.subscription);
+        const email = acct.settings?.email;
+        for (const r of dueReminders(acct, now)) {
+          if (!(await store.claim(`sent:${acctId}:${r.key}`, 3 * DAY))) continue;
+          const payload = { title: r.title, body: r.body, tag: `${r.task.id}:${r.kind}`, taskId: r.task.id, kind: r.kind };
+          const results = await Promise.all(targets.map(async ([id, d]) => {
+            const res = await sendPush(d.subscription, payload, LATE[r.kind]);
+            if (res === 'gone') gone.add(id);
+            return res;
+          }));
+          sent += results.filter((x) => x === 'ok').length;
+          if (email && (await sendEmail(email, { ...r, due: r.task.due }))) sent++;
+        }
+      }));
+      for (const id of gone) await store.remove(id);
+
+      // 2) Legacy: reminder lists pushed by older app versions.
+      await Promise.all(devices.filter(([id]) => !gone.has(id)).map(async ([id, dev]) => {
         let changed = false;
         const jobs = [];
         for (const r of dev.reminders || []) {
@@ -116,13 +288,53 @@ export function createCore({ store, vapid, subject, recognizeUrl, pushHosts }) {
   const routes = {
     'GET /api/health': async () => ({ ok: true }),
 
-    'GET /api/config': async () => ({ publicKey: vapid.publicKey }),
+    'GET /api/config': async () => ({ publicKey: vapid.publicKey, email: !!mailer, sync: !!store.putAccount }),
+
+    // Save this device's tasks on the server and get back the merged list from all devices.
+    'POST /api/sync': async (body) => {
+      const id = checkAccount(body.account);
+      const now = Date.now();
+      const acct = mergeAccount((await store.getAccount(id)) || {}, body, now);
+      await store.putAccount(id, acct);
+      let device = null;
+      if (body.deviceId) {
+        const devId = checkDeviceId(body.deviceId);
+        const dev = await store.get(devId);
+        device = !!dev;
+        if (dev && dev.account !== id) { dev.account = id; dev.reminders = []; await store.put(devId, dev); }
+      }
+      const email = acct.settings.email;
+      return {
+        ok: true,
+        tasks: acct.tasks,
+        deleted: acct.deleted,
+        settings: acct.settings,
+        email: { configured: !!mailer, allowed: emailAllowed(email) },
+        device,
+        serverTime: now,
+      };
+    },
+
+    'POST /api/test-email': async (body) => {
+      const acct = await store.getAccount(checkAccount(body.account));
+      const to = acct?.settings?.email;
+      if (!mailer) throw httpError(503, 'email is not configured on the server');
+      if (!to) throw httpError(400, 'no email saved');
+      if (!emailAllowed(to)) throw httpError(403, 'this email is not allowed on this server');
+      const ok = await sendEmail(to, { title: 'ده إيميل تجربة من مهامي', body: 'لو وصلك يبقى تنبيهات الإيميل شغالة ✓', due: null });
+      if (!ok) throw httpError(502, 'email failed');
+      return { ok: true };
+    },
 
     'POST /api/subscribe': async (body) => {
       const id = checkDeviceId(body.deviceId);
       const subscription = checkSubscription(body.subscription);
       const dev = (await store.get(id)) || { reminders: [] };
       dev.subscription = subscription;
+      if (body.account) {
+        dev.account = checkAccount(body.account);
+        dev.reminders = []; // the server now builds reminders from the account's tasks
+      }
       dev.updatedAt = Date.now();
       await store.put(id, dev);
       return { ok: true };

@@ -44,8 +44,11 @@ export const serverAvailable = () => server.ok;
 export function remindersFor(task, settings) {
   if (!task || task.done || !task.due) return [];
   const out = [];
+  // A task added too close to its time for any earlier reminder still gets one at its time.
+  const created = task.createdAt || 0;
+  const hadEarlier = ['day', 'hour'].some((k) => settings.remind?.[k] && created <= task.due - OFFSETS[k]);
   for (const kind of ['day', 'hour', 'due']) {
-    if (!settings.remind?.[kind]) continue;
+    if (!settings.remind?.[kind] && !(kind === 'due' && !hadEarlier)) continue;
     out.push({
       id: `${task.id}:${kind}:${task.due}`,
       taskId: task.id,

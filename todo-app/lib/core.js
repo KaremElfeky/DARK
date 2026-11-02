@@ -219,8 +219,10 @@ export function createCore({ store, vapid, subject, recognizeUrl, pushHosts, mai
     const out = [];
     for (const t of acct.tasks || []) {
       if (t.done || !t.due) continue;
+      // A task added too close to its time for any earlier reminder still gets one at its time.
+      const hadEarlier = ['day', 'hour'].some((k) => remind[k] && t.createdAt <= t.due - OFFSETS[k]);
       for (const kind of ['day', 'hour', 'due']) {
-        if (!remind[kind]) continue;
+        if (!remind[kind] && !(kind === 'due' && !hadEarlier)) continue;
         const at = t.due - OFFSETS[kind];
         if (at > now || now - at > LATE[kind]) continue;
         if (t.createdAt > at) continue; // task was added after this reminder's time — don't nag right away

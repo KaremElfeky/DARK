@@ -100,3 +100,14 @@ test('sync reports when the scheduler last ran', async () => {
   res = await core.handle('POST', '/api/sync', { account, tasks: [] });
   assert.equal(res.data.lastTick, 12345);
 });
+
+test('a task added minutes before its time still alerts at its time, even with "at the time" off', async () => {
+  const { mails, core } = setup();
+  const now = Date.now();
+  await sync(core, [
+    { id: 'quick', title: 'Test', due: now - 1000, createdAt: now - 2 * MIN, updatedAt: now - 2 * MIN },
+    { id: 'planned', title: 'Planned', due: now - 1000, createdAt: now - 3 * HOUR, updatedAt: now - 3 * HOUR },
+  ], { remind: { day: true, hour: true, due: false }, email: 'me@example.com', at: now });
+  assert.equal(await core.runScheduler(), 1);
+  assert.deepEqual(mails.map((m) => m.subject), ['🔔 دلوقتي: Test']);
+});

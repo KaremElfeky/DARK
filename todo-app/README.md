@@ -1,0 +1,48 @@
+# مهامي ✍️
+
+A simple to-do app (PWA) that works on the iPad, phones, and computers.
+
+- **Type** your tasks. If you write the time in the sentence ("اتصل بماما بكرة ٥م"), the app picks it up and sets the date for you.
+- **Write with the Apple Pencil** on a lined notebook page. Each line becomes a task, and you review the text before it's added.
+- **Overdue tasks**: for each one you can mark it done, postpone it (an hour, tomorrow, next week, or any time you pick), or delete it. You can also postpone or delete all of them at once.
+- **Notifications** a day before and an hour before every task. You can also add one at the task time itself.
+- Works **offline**, has a dark mode, and lets you export tasks to the calendar or take a backup.
+
+## Running it
+
+```bash
+cd todo-app
+npm install
+npm start          # http://localhost:8080
+npm test           # parser tests + full push server test
+```
+
+## Deploying (so notifications arrive while the app is closed)
+
+The app has to be deployed **over HTTPS** with `server.js` running all the time:
+
+1. Generate the keys once: `npx web-push generate-vapid-keys`
+2. On any Node host (Render, Railway, Fly, a VPS, or Docker using the included `Dockerfile`), set:
+   - `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`
+   - `VAPID_SUBJECT=mailto:your-email@domain.com`
+   - `DATA_DIR` → a path on a **persistent disk** (subscriptions and reminders are stored there)
+3. If your host's free tier sleeps: set up a free job on [cron-job.org](https://cron-job.org) that calls `https://your-site/api/tick` every minute. It wakes the server up and sends any due notifications.
+
+> If you want the website on a separate host (GitHub Pages, for example), put the server's URL in `public/js/config.js`.
+
+### On the iPad / iPhone
+Notifications on iOS only work after the app is installed: open the site in Safari → **Share** → **Add to Home Screen** → open the app from the icon → turn on notifications. This needs iPadOS 16.4 or later.
+
+## How it works
+
+| Part | File |
+|---|---|
+| UI and logic | `public/js/app.js` |
+| Date parsing (Egyptian Arabic and English) | `public/js/dates.js` |
+| Pencil handwriting + line detection + recognition | `public/js/ink.js` |
+| Notifications (push + local fallback) | `public/js/notify.js`, `public/sw.js` |
+| Server: hosting + push sending + scheduling | `server.js` |
+
+- **Handwriting recognition** uses Google's handwriting engine (the one behind Google Input Tools), which supports Arabic and English. It needs an internet connection, and your writing stays saved if the connection drops. The server also acts as a backup proxy for it.
+- **Tasks are stored on the device** (localStorage). Back them up from Settings.
+- If the server isn't available, notifications only work while the app is open. Calendar export (`.ics` with both reminders) is a backup that always works.

@@ -1,0 +1,19 @@
+{
+  "name": "mahami",
+  "version": "1.0.0",
+  "description": "مهامي — a simple to-do PWA with Apple Pencil handwriting and reminders 1 day + 1 hour before each task.",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "TZ=Africa/Cairo node --test tests/*.test.mjs",
+    "vapid": "web-push generate-vapid-keys"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}

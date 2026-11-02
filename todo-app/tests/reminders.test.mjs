@@ -87,3 +87,16 @@ test('test email goes to the saved address', async () => {
   assert.equal(res.status, 200);
   assert.equal(mails.length, 1);
 });
+
+test('sync reports when the scheduler last ran', async () => {
+  const store = memoryStore();
+  const meta = new Map();
+  store.getMeta = async (k) => meta.get(k) ?? null;
+  store.setMeta = async (k, v) => { meta.set(k, v); };
+  const core = createCore({ store, vapid: keys });
+  let res = await core.handle('POST', '/api/sync', { account, tasks: [] });
+  assert.equal(res.data.lastTick, null);
+  await core.runScheduler(12345);
+  res = await core.handle('POST', '/api/sync', { account, tasks: [] });
+  assert.equal(res.data.lastTick, 12345);
+});

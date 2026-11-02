@@ -43,7 +43,7 @@ let saveTimer = null;
 async function loadDb() {
   try {
     const parsed = JSON.parse(await readFile(DB_FILE, 'utf8'));
-    db = { devices: parsed.devices || {}, accounts: parsed.accounts || {}, claims: parsed.claims || {} };
+    db = { devices: parsed.devices || {}, accounts: parsed.accounts || {}, claims: parsed.claims || {}, meta: parsed.meta || {} };
   } catch {
     db = { devices: {}, accounts: {}, claims: {} };
   }
@@ -135,6 +135,8 @@ const store = {
   async getAccount(id) { return db.accounts[id] || null; },
   async putAccount(id, acct) { db.accounts[id] = acct; saveSoon(); },
   async allAccounts() { return Object.entries(db.accounts); },
+  async getMeta(name) { return db.meta?.[name] ?? null; },
+  async setMeta(name, value) { db.meta = { ...(db.meta || {}), [name]: value }; },
   async claim(name, ttlMs) {
     const now = Date.now();
     for (const [k, exp] of Object.entries(db.claims)) if (exp < now) delete db.claims[k];

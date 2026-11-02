@@ -560,10 +560,13 @@ function openSettings() {
       unsupported: `<div class="status bad">${icon('bellOff')}<div><b>المتصفح ده مش بيدعم الإشعارات</b><span>استخدم تصدير التقويم تحت كبديل.</span></div></div>`,
     }[st];
 
+    const ss = sync.status();
+    const tickWarn = sync.schedulerOk() ? '' : `<div class="status bad">${icon('alert')}<div><b>السيرفر مش بيشيّك على المواعيد</b><span>${ss.lastTick ? `آخر مرة اشتغل ${esc(relative(ss.lastTick, ss.serverTime))}.` : 'عمره ما اشتغل.'} التنبيهات مش هتوصل والأبلكيشن مقفول لحد ما cron-job.org ينادي ${esc(location.origin)}/api/tick كل دقيقة.</span></div></div>`;
     ctl.setBody(`
       <section class="set-group">
         <h3>الإشعارات</h3>
         ${statusHTML}
+        ${tickWarn}
         <label class="switch"><span>قبل المهمة بيوم</span><input type="checkbox" role="switch" data-remind="day" ${s.remind.day ? 'checked' : ''}></label>
         <label class="switch"><span>قبل المهمة بساعة</span><input type="checkbox" role="switch" data-remind="hour" ${s.remind.hour ? 'checked' : ''}></label>
         <label class="switch"><span>في الميعاد نفسه</span><input type="checkbox" role="switch" data-remind="due" ${s.remind.due ? 'checked' : ''}></label>

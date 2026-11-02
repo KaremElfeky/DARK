@@ -4,6 +4,7 @@
 // A store implements:
 //   get(id) -> device | null      put(id, device)      remove(id)      all() -> [[id, device], ...]
 //   getAccount(id) -> account | null   putAccount(id, account)   allAccounts() -> [[id, account], ...]
+//   getMeta(name) / setMeta(name, value)   small values, e.g. when the scheduler last ran
 //   claim(key, ttlMs) -> true the first time a key is claimed (until it expires), false after that
 // where device  = { subscription, account?, reminders: [...] (legacy clients), updatedAt }
 //       account = { tasks: [...], deleted: { taskId: deletedAt }, settings: { remind, email, at }, updatedAt }
@@ -236,6 +237,7 @@ export function createCore({ store, vapid, subject, recognizeUrl, pushHosts, mai
     running = true;
     let sent = 0;
     try {
+      await store.setMeta?.('lastTick', String(now));
       const [devices, accounts] = await Promise.all([store.all(), store.allAccounts ? store.allAccounts() : []]);
       const gone = new Set();
 
@@ -304,8 +306,10 @@ export function createCore({ store, vapid, subject, recognizeUrl, pushHosts, mai
         if (dev && dev.account !== id) { dev.account = id; dev.reminders = []; await store.put(devId, dev); }
       }
       const email = acct.settings.email;
+      const lastTick = Number(await store.getMeta?.('lastTick')) || null;
       return {
         ok: true,
+        lastTick,
         tasks: acct.tasks,
         deleted: acct.deleted,
         settings: acct.settings,

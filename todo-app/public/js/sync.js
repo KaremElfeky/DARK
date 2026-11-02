@@ -14,6 +14,9 @@ let onDeviceMissing = () => {};
 
 export const status = () => state;
 
+/** Is the server checking for due reminders? (cron-job.org must call /api/tick every minute) */
+export const schedulerOk = () => !state.ok || (state.lastTick && state.serverTime - state.lastTick < 5 * MIN);
+
 export function init(opts = {}) {
   onChange = opts.onChange || onChange;
   onDeviceMissing = opts.onDeviceMissing || onDeviceMissing;
@@ -53,7 +56,7 @@ async function run() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     store.applyServer(data);
-    state = { ok: true, at: Date.now(), email: data.email || state.email, error: null };
+    state = { ok: true, at: Date.now(), email: data.email || state.email, error: null, lastTick: data.lastTick || null, serverTime: data.serverTime || Date.now() };
     if (data.device === false) onDeviceMissing();
     if (store.rev !== rev) schedule(500); // edited while we were syncing -> upload that too
     return true;

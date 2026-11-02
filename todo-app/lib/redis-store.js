@@ -42,6 +42,9 @@ export const redisStore = {
   async putAccount(id, acct) { await pipeline([['SET', acctKey(id), JSON.stringify(acct)], ['SADD', ACCTS, id]]); },
   async allAccounts() { return list(ACCTS, acctKey); },
 
+  async getMeta(name) { return cmd('GET', `mahami:meta:${name}`); },
+  async setMeta(name, value) { await cmd('SET', `mahami:meta:${name}`, String(value)); },
+
   // SET NX: only the first caller gets 'OK' -> a reminder is never sent twice, even if two ticks overlap.
   async claim(name, ttlMs) { return (await cmd('SET', `mahami:${name}`, '1', 'NX', 'PX', String(ttlMs))) === 'OK'; },
 };
